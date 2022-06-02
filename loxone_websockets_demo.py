@@ -56,10 +56,10 @@ aes_iv = str("782F413F442A472D4B6150645367566B")
 #LOX_PORT = "80"
 env = Env("LOX_")
 myConfig = {
-    'user': 'user2',
-    'password' : 'dkdk',
-    'ip' : '192.168.2.1',
-    'port' : '8080'
+    'user': '',
+    'password' : '',
+    'ip' : '',
+    'port' : ''
     }
 env.setDefaults(myConfig)
 
@@ -102,7 +102,7 @@ class LoxHeader:
             b'\x00': 'text', #"Text-Message"
             b'\x01': 'bin', #"Binary File"
             b'\x02': 'value', #"Event-Table of Value-States
-            b'\x03': 'text', # Event-Table of Text-States
+            b'\x03': 'text_event', # Event-Table of Text-States
             b'\x04': 'daytimer', #Event-Table of Daytimer-States
             b'\x05': 'out-of-service', #e.g. Firmware-Upgrade - no following message at all. Connection closes
             b'\x06': 'still_alive', #response to keepalive-message
@@ -126,8 +126,8 @@ class LoxState:
 
         #Decode UUID
         bitstream = ConstBitStream(uuid)
-        data1, data2, data3, data41, data42, data43, data44, data45, data46, data47, data48 = bitstream.unpack('uint:32, uint:16, uint:16, uint:8, uint:8, uint:8, uint:8, uint:8, uint:8, uint:8, uint:8')
-        uuid = "{:x}-{:x}-{:x}-{:x}{:x}{:x}{:x}{:x}{:x}{:x}{:x}".format(data1, data2, data3, data41, data42, data43, data44, data45, data46, data47, data48)
+        data1, data2, data3, data41, data42, data43, data44, data45, data46, data47, data48 = bitstream.unpack('uintle:32, uintle:16, uintle:16, uint:8, uint:8, uint:8, uint:8, uint:8, uint:8, uint:8, uint:8')
+        uuid = "{:08x}-{:04x}-{:04x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}".format(data1, data2, data3, data41, data42, data43, data44, data45, data46, data47, data48)
         return uuid
    
     def setUUID(self, uuid: bytes):
@@ -192,18 +192,43 @@ class LoxTextState(LoxState):
     # } ​PACKED​ ​EvDataText​;
     
     def __init__(self, message):
-        LoxState.__init__()
+        LoxState.__init__(self)
         
         # extract UUID
-        self.setUUID(self, message[0:16])
+        self.setUUID(message[0:16])
         
         # extract icon UUID
         self.uuid_icon = LoxState.decodeUUID(message[16:32])
         
         # calculate Text length
+        bitstream = ConstBitStream(message[32:36])
+        self.textLen = bitstream.unpack('uintle:32')[0]
         
         # extract Text
-    
+        self.text = message[36:36+self.textLen].decode('utf8','strict')
+
+    @classmethod #cls is a "keyword" for the class itself. Hence, parseTable is not bound to an instance  
+    def parseTable(cls, eventTable: bytes) -> dict:
+        # take a longer message and split it and create ValueState-Instances
+        # Return a dict with UUIDs and values
+        instances = list()
+        
+        i = 0
+        while i < len(eventTable):
+            startI = i
+            i+=32 #Skip UUID and icon UUID
+            bitstream = ConstBitStream(eventTable[i:i+4])
+            textLen = bitstream.unpack('uintle:32')[0]
+            i += 4 + textLen #Skip textLen and text itself
+            if (i % 4) != 0:
+              i += 4 - i % 4 #Skip padding
+            instances.append( cls(eventTable[startI:i]) ) # cls() creates an instance of the class itself
+            
+        values = dict()
+        for inst in instances:
+            values[inst.uuid] = inst.text
+            
+        return values
    
 
 ### These are the functions used ###
@@ -263,26 +288,49 @@ async def webSocketLx():
         await myWs.send("data/LoxAPP3.json")
         header = LoxHeader(await myWs.recv())
         print(header.msg_type)
-        #print("Structure File: ", json.dumps(structure_file))
         print(await myWs.recv())
         structure_file = await myWs.recv()
         struct_dict = json.loads(structure_file)
+        print("Structure File: ", json.dumps(structure_file))
         
         await myWs.send("jdev/sps/enablebinstatusupdate")
         
         for i in range(0, 15):
             header = LoxHeader(await myWs.recv())
-            if header.msg_type == 'value':
-                message = await myWs.recv()
+            message = await myWs.recv()
+            if header.msg_type == 'text':
+                print("Text message: ", message)
+            elif header.msg_type == 'bin':
+                print("Binary message: ", message)
+            elif header.msg_type == 'value':
                 statesDict = LoxValueState.parseTable(message)
-                print(statesDict)
-                    
-                valueState = LoxValueState(message)
-                print("UUID: ", valueState.uuid, "Value: ", valueState.value, "Name: ", nested_lookup(valueState.uuid, struct_dict, with_keys = True))
-                
+                #print(statesDict)
+                for uuid in statesDict:
+                  nameLookup = nested_lookup(uuid, struct_dict, with_keys = True)
+                  name = 'Unknown'
+                  if uuid in nameLookup:
+                    name = nameLookup[uuid][0]['name']
+                  print("Value {}({}): {}".format(name,uuid, statesDict[uuid]))
+            elif header.msg_type == 'text_event':
+                print("Text message: ", message)
+                textsDict = LoxTextState.parseTable(message)
+                print(textsDict)
+                for uuid in textsDict:
+                  nameLookup = nested_lookup(uuid, struct_dict, with_keys = True)
+                  name = 'Unknown'
+                  if uuid in nameLookup:
+                    name = nameLookup[uuid][0]['name']
+                  print("Text {}({}): {}".format(name,uuid, textsDict[uuid]))
+            elif header.msg_type == 'daytimer':
+                print("Daytimer message: ", message)
+            elif header.msg_type == 'out-of-service':
+                print("Out-of-service message: ", message)
+            elif header.msg_type == 'still_alive':
+                print("Still alive message: ", message)
+            elif header.msg_type == 'still_alive':
+                print("Weather message: ", message)
             else:
-                print("Message coming from Loxone: ", await myWs.recv())
-            await asyncio.sleep(2)
+                print("Unknown message: ", message)
         
 # Function to RSA encrypt the AES key and iv
 async def create_sessionkey(aes_key, aes_iv):
